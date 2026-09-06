@@ -5,6 +5,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
+const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
+const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
 
 app.use(express.json());
 
@@ -152,6 +154,88 @@ app.get('/youtube/video/:id', async (req, res) => {
       commentCount: Number(item.statistics.commentCount || 0),
       topComments,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function requireNaverKeys(res) {
+  if (!NAVER_CLIENT_ID || !NAVER_CLIENT_SECRET) {
+    res.status(500).json({ error: 'NAVER_CLIENT_ID / NAVER_CLIENT_SECRET is not configured' });
+    return false;
+  }
+  return true;
+}
+
+// 네이버 통합 검색어 트렌드 (일자별 상대 검색량 추이)
+app.get('/naver/trend', async (req, res) => {
+  if (!requireNaverKeys(res)) return;
+
+  const keyword = req.query.keyword;
+  if (!keyword) {
+    return res.status(400).json({ error: 'Query parameter "keyword" is required' });
+  }
+
+  const endDate = req.query.endDate || new Date().toISOString().slice(0, 10);
+  const startDate =
+    req.query.startDate ||
+    new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const timeUnit = req.query.timeUnit || 'date';
+
+  try {
+    const response = await fetch('https://openapi.naver.com/v1/datalab/search', {
+      method: 'POST',
+      headers: {
+        'X-Naver-Client-Id': NAVER_CLIENT_ID,
+        'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        startDate,
+        endDate,
+        timeUnit,
+        keywordGroups: [{ groupName: keyword, keywords: [keyword] }],
+      }),
+    });
+    const data = await response.json();
+
+    if (data.errorMessage) {
+      return res.status(response.status).json({ error: data.errorMessage });
+    }
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 네이버 블로그/카페/뉴스 등 검색 결과 조회
+app.get('/naver/search', async (req, res) => {
+  if (!requireNaverKeys(res)) return;
+
+  const query = req.query.q;
+  if (!query) {
+    return res.status(400).json({ error: 'Query parameter "q" is required' });
+  }
+  const type = req.query.type || 'blog'; // blog, cafearticle, news, shop 등
+  const display = Math.min(parseInt(req.query.display, 10) || 10, 100);
+  const sort = req.query.sort || 'sim'; // sim(정확도) or date
+
+  try {
+    const url = `https://openapi.naver.com/v1/search/${type}.json?query=${encodeURIComponent(query)}&display=${display}&sort=${sort}`;
+    const response = await fetch(url, {
+      headers: {
+        'X-Naver-Client-Id': NAVER_CLIENT_ID,
+        'X-Naver-Client-Secret': NAVER_CLIENT_SECRET,
+      },
+    });
+    const data = await response.json();
+
+    if (data.errorMessage) {
+      return res.status(response.status).json({ error: data.errorMessage });
+    }
+
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
