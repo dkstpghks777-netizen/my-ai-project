@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const { XMLParser } = require('fast-xml-parser');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -236,6 +237,44 @@ app.get('/naver/search', async (req, res) => {
     }
 
     res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 구글 트렌드 실시간 인기 검색어 (한국 기본) - 공식 공개 RSS 피드 사용
+app.get('/trends/realtime', async (req, res) => {
+  const geo = req.query.geo || 'KR';
+
+  try {
+    const response = await fetch(`https://trends.google.com/trending/rss?geo=${geo}`);
+    const xml = await response.text();
+
+    const parser = new XMLParser({ ignoreAttributes: false });
+    const parsed = parser.parse(xml);
+
+    let items = parsed?.rss?.channel?.item || [];
+    if (!Array.isArray(items)) items = [items];
+
+    const results = items.map((item) => {
+      let newsItems = item['ht:news_item'] || [];
+      if (!Array.isArray(newsItems)) newsItems = [newsItems];
+
+      return {
+        keyword: item.title,
+        approxTraffic: item['ht:approx_traffic'],
+        publishedAt: item.pubDate,
+        relatedNews: newsItems
+          .filter(Boolean)
+          .map((n) => ({
+            title: n['ht:news_item_title'],
+            source: n['ht:news_item_source'],
+            url: n['ht:news_item_url'],
+          })),
+      };
+    });
+
+    res.json({ geo, results });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
