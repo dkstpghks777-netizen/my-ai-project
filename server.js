@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
+const multer = require('multer');
 const { XMLParser } = require('fast-xml-parser');
+const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,6 +10,58 @@ const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
 const NAVER_CLIENT_ID = process.env.NAVER_CLIENT_ID;
 const NAVER_CLIENT_SECRET = process.env.NAVER_CLIENT_SECRET;
+
+const WORKSPACE_FOLDER_NAME = process.env.DRIVE_WORKSPACE_FOLDER_NAME || 'my-ai-project-workspace';
+const upload = multer({ storage: multer.memoryStorage() });
+
+function getDriveClient() {
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_DRIVE_CLIENT_ID,
+    process.env.GOOGLE_DRIVE_CLIENT_SECRET
+  );
+  oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_DRIVE_REFRESH_TOKEN });
+  return google.drive({ version: 'v3', auth: oauth2Client });
+}
+
+let workspaceFolderIdCache = null;
+
+async function getOrCreateWorkspaceFolder(drive) {
+  if (workspaceFolderIdCache) return workspaceFolderIdCache;
+
+  const existing = await drive.files.list({
+    q: `name='${WORKSPACE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`,
+    fields: 'files(id, name)',
+    spaces: 'drive',
+  });
+
+  if (existing.data.files.length > 0) {
+    workspaceFolderIdCache = existing.data.files[0].id;
+    return workspaceFolderIdCache;
+  }
+
+  const created = await drive.files.create({
+    requestBody: {
+      name: WORKSPACE_FOLDER_NAME,
+      mimeType: 'application/vnd.google-apps.folder',
+    },
+    fields: 'id',
+  });
+
+  workspaceFolderIdCache = created.data.id;
+  return workspaceFolderIdCache;
+}
+
+function requireDriveConfig(res) {
+  if (
+    !process.env.GOOGLE_DRIVE_CLIENT_ID ||
+    !process.env.GOOGLE_DRIVE_CLIENT_SECRET ||
+    !process.env.GOOGLE_DRIVE_REFRESH_TOKEN
+  ) {
+    res.status(500).json({ error: 'Google Drive credentials are not configured' });
+    return false;
+  }
+  return true;
+}
 
 app.use(express.json());
 
@@ -275,6 +329,89 @@ app.get('/trends/realtime', async (req, res) => {
     });
 
     res.json({ geo, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 워크스페이스 폴더 안의 파일 목록 조회
+app.get('/drive/files', async (req, res) => {
+  if (!requireDriveConfig(res)) return;
+
+  try {
+    const drive = getDriveClient();
+    const folderId = await getOrCreateWorkspaceFolder(drive);
+
+    const result = await drive.files.list({
+      q: `'${folderId}' in parents and trashed=false`,
+      fields: 'files(id, name, mimeType, size, modifiedTime, webViewLink)',
+      orderBy: 'modifiedTime desc',
+    });
+
+    res.json({ folderId, files: result.data.files });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 워크스페이스 폴더에 파일 업로드 (multipart/form-data, 필드명 "file")
+app.post('/drive/upload', upload.single('file'), async (req, res) => {
+  if (!requireDriveConfig(res)) return;
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded (field name should be "file")' });
+  }
+
+  try {
+    const drive = getDriveClient();
+    const folderId = await getOrCreateWorkspaceFolder(drive);
+    const { Readable } = require('stream');
+
+    const result = await drive.files.create({
+      requestBody: {
+        name: req.file.originalname,
+        parents: [folderId],
+      },
+      media: {
+        mimeType: req.file.mimetype,
+        body: Readable.from(req.file.buffer),
+      },
+      fields: 'id, name, webViewLink',
+    });
+
+    res.json(result.data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 워크스페이스 폴더의 특정 파일 다운로드
+app.get('/drive/files/:id/download', async (req, res) => {
+  if (!requireDriveConfig(res)) return;
+
+  try {
+    const drive = getDriveClient();
+    const fileMeta = await drive.files.get({ fileId: req.params.id, fields: 'name, mimeType' });
+    const fileRes = await drive.files.get(
+      { fileId: req.params.id, alt: 'media' },
+      { responseType: 'stream' }
+    );
+
+    res.setHeader('Content-Disposition', `attachment; filename="${fileMeta.data.name}"`);
+    res.setHeader('Content-Type', fileMeta.data.mimeType);
+    fileRes.data.pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 워크스페이스 폴더의 특정 파일 삭제
+app.delete('/drive/files/:id', async (req, res) => {
+  if (!requireDriveConfig(res)) return;
+
+  try {
+    const drive = getDriveClient();
+    await drive.files.delete({ fileId: req.params.id });
+    res.json({ deleted: req.params.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
